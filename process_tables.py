@@ -27,7 +27,7 @@ def cleanup_table(df):
 
 def query_llm(prompt):
 
-    return ollama.generate(model='llama3.2', prompt=prompt)
+    return ollama.generate(model='llama3.2', prompt=prompt).response
 
 def create_prompt(df, context, prompt):
 
