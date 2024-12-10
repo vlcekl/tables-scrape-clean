@@ -10,7 +10,7 @@ def create_tables_schema(dataset):
 
 def load_initial_prompt():
 
-    with open('./prompt_initial_modified.md', 'r') as f:
+    with open('./prompts/prompt_initial_modified.md', 'r') as f:
         prompt = f.read()
 
     return prompt
