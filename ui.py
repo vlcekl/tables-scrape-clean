@@ -49,9 +49,6 @@ if source_data["tables"]:
 else:
     selected_table = None
 
-# Preloaded instructions
-preloaded_instructions = load_initial_prompt()
-instructions = st.sidebar.text_area("Cleaning Instructions for LLM:", preloaded_instructions, placeholder="Describe cleaning steps...", height=340)
 
 # Process button
 process_button = st.sidebar.button("Process")
@@ -77,19 +74,20 @@ if process_button and selected_table is not None:
 
     df_precleaned = cleanup_table(source_data['tables'][selected_table]['data_frame'])
 
-    # Cleaned Data Schema
+    # Pre-cleaned data frame
     with st.expander(f"Pre-cleaned Table {selected_table}"):
         st.dataframe(df_precleaned)
 
     with st.expander(f"Context: {selected_table}"):
         st.write(source_data['tables'][selected_table]['context'])
 
-    # Cleaned Data Table
+    # Compile a prompt
+    prompt_start = load_initial_prompt()
+    prompt = create_prompt(df_precleaned, source_data['tables'][selected_table]['context'], prompt_start)
     with st.expander(f"Prompt: {selected_table}"):
-        prompt = create_prompt(df_precleaned, source_data['tables'][selected_table]['context'], instructions)
         st.write(prompt)
 
     # Query LLM - print response
+    response = query_llm(prompt)
     with st.expander(f"Response: {selected_table}"):
-        response = query_llm(prompt)
         st.write(response)

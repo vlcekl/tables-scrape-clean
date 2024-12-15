@@ -1,0 +1,23 @@
+{
+    "processing_info": "Dealer Transactions",
+    "row_numbers": { "header": 2, "summary": 1 },
+    "table_description": "This table represents monthly dealer transaction data.",
+    "table_schema": [
+        {
+            "column_name": "name",
+            "description": "Name of the dealer"
+        },
+        {
+            "column_name": "quantity",
+            "description": "Quantity of the product sold"
+        },
+        {
+            "column_name": "day",
+            "description": "Date of the transaction in day format"
+        },
+        {
+            "column_name": "time",
+            "description": "Time of the transaction in 24-hour format"
+        }
+    ]
+}

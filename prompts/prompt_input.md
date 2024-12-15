@@ -27,11 +27,8 @@ Use this metadata to infer the purpose of the table and generate meaningful desc
      ```json
      {
        "table_description": "<Brief description of the table>",
-       "row_numbers": {
-          "header": "<Number of header rows at the top>",
-          "data": "<Number of summary rows at the bottom",
-          "summary": "<Number of summary rows at the bottom",
-       },
+       "header_rows_number": "<Number of header rows at the top>",
+       "summary_rows_number": "<Number of summary rows at the bottom",
        "table_schema": [
          {
            "column_name": "<Column Name>",
@@ -62,22 +59,22 @@ Use this metadata to infer the purpose of the table and generate meaningful desc
   "table_schema": [
     {
       "column_name": "Customer ID",
-      "data_type": "String",
+      "data_type": "object",
       "description": "Unique identifier for customers",
     },
     {
       "column_name": "Customer Name",
-      "data_type": "String",
+      "data_type": "object",
       "description": "Name of the customer",
     },
     {
       "column_name": "Amount [$]",
-      "data_type": "Float",
+      "data_type": "float",
       "description": "Transaction amount in USD",
     },
     {
       "column_name": "Transaction Date",
-      "data_type": "Date",
+      "data_type": "datetime",
       "description": "Date of the transaction",
     }
   ]
@@ -86,3 +83,13 @@ Use this metadata to infer the purpose of the table and generate meaningful desc
 
 **Your Task:**
 Using the provided metadata and table structure, output a JSON object containing a table description and schema, including all identified ID columns. Ensure the output is well-structured, accurate, and adheres to the format provided above. Do not include any text beyond the JSON.
+
+- **Preceding Heading**: "Dealer Transactions"
+- **Surrounding Text**: "Monthly report"
+
+**Input Table:**
+|   | name      | quantity | day      |
+|   |           |          | time     |
+| 001   |   | 150.50 | 2020-10-11 |
+| 002   | Jane Doe  | NaN    | 2021-01-13 |
+| Tot | -         | 300.50 | -          |

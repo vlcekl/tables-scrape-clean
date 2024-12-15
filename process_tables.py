@@ -1,5 +1,33 @@
 import pandas as pd
+from enum import Enum
+from pydantic import BaseModel, Field
 import ollama
+
+class DataType(str, Enum):
+    """Data types identified in the raw tabular data column"""
+    int_type = 'int'
+    float_type = 'float'
+    str_type = 'str'
+
+class TableSchema(BaseModel):
+    """Table schema: basic information"""
+    column_name: str = Field(description="Short but informative column name derived from the header, data, and table description")
+    data_type: DataType = Field(DataType.str_type, description="Identified data type - int, float, or str")
+    description: str = Field(description="More informative description of a data column to be used by humans and LLMs.")
+
+class RowNumbers(BaseModel):
+    """Number of taw table rows corresponding to header, data, and summary"""
+    header: int = Field(0, description="Number of rows used to define a header")
+    data: int = Field(0, description="Number of rows corresponding to data")
+    summary: int = Field(0, description="Number of rows corresponding to table summary statistics and footnotes")
+
+class TableMetadata(BaseModel):
+    """Table metadata describing raw tabular data,
+      including table descriptions, header and summary rows numbers, and table schema"""
+    table_description: str = Field(description="Informative description of the table based on the table context and data. To be used by humans and LLMs.")
+    number_of_rows: RowNumbers = Field(description="Identified numbers of header, data, and summary rows")
+    schema: list[TableSchema] = Field(description="Schema identified in raw tabular data")
+    processing_info: str = Field(description="Information about raw data processing steps, such as how header, data, summary rows were identified, what context was used, and what choices were made.")
 
 def create_tables_schema(dataset):
 
@@ -10,7 +38,7 @@ def create_tables_schema(dataset):
 
 def load_initial_prompt():
 
-    with open('./prompts/prompt_initial_modified.md', 'r') as f:
+    with open('./prompts/prompt_json_simple.md', 'r') as f:
         prompt = f.read()
 
     return prompt
@@ -27,7 +55,7 @@ def cleanup_table(df):
 
 def query_llm(prompt):
 
-    return ollama.generate(model='llama3.2', prompt=prompt).response
+    return ollama.generate(model='llama3.2', prompt=prompt, format=TableMetadata.model_json_schema()).response
 
 def create_prompt(df, context, prompt):
 
