@@ -12,9 +12,9 @@ Use this metadata to infer the purpose of the table and generate meaningful desc
 1. **Generate a High-Level Table Description:**
    - Summarize the purpose and content of the table.
    - Incorporate relevant metadata (e.g., preceding heading, surrounding text) to provide context.
-   - Input tables may have headers spanning multiple rows. Identify them and create informative single-row column names.
+   - Input tables may have headers spanning multiple rows, which may be more than indicated in the Markdown format. Identify them and create informative single-row column names.
    - Return the number of identified header rows at the tom (rows before data rows begin)
-   - Return the number of special summary rows at the bottom that are not a regular part of the column data
+   - Return the number of special summary rows at the bottom that are not a regular part of the column data. There may be none.
 
 2. **Create a Table Schema:**
    - For each column in the table, provide:
@@ -27,15 +27,14 @@ Use this metadata to infer the purpose of the table and generate meaningful desc
      ```json
      {
        "table_description": "<Brief description of the table>",
-       "row_numbers": {
-          "header": "<Number of header rows at the top>",
-          "data": "<Number of summary rows at the bottom",
+       "row_counts": {
+          "header": "<Number header rows at the top>",
           "summary": "<Number of summary rows at the bottom",
        },
        "table_schema": [
          {
            "column_name": "<Column Name>",
-           "data_type": "<Data Type>",
+           "data_type": "<Data Type: str, int, of float>",
            "description": "<Description of the column>",
          }
        ]
@@ -43,22 +42,28 @@ Use this metadata to infer the purpose of the table and generate meaningful desc
      ```
 
 **Example Input:**
+
+**Contenxt**
 - **Preceding Heading**: "Customer Transactions Overview"
 - **Surrounding Text**: "This table provides a summary of recent transactions made by customers. It includes the unique customer identifiers, their names, transaction amounts, and the dates on which the transactions occurred."
 
-**Input Table:**
+**Table:**
 |       | Col2      | Amount | Date       |
+|-------|-----------|--------|------------|
 |       |           | US $   |            |
 | 001   | John Doe  | 150.50 | 2024-11-01 |
 | 002   | Jane Doe  | NaN    | 2024-11-03 |
-| Total | -         | 300.50 | -          |
+| 005   | John Doe  |  50.15 | 2024-11-00 |
+| Total | -         | 200.65 | -          |
 
 **Example Output:**
 ```json
 {
   "table_description": "This table represents customer transaction data. It includes details on individual transactions, such as customer identifiers, names, transaction amounts, and dates.",
-  "header_rows_number": 2,
-  "summary_rows_numbe": 1,
+  "row_counts": {
+    "header": 2,
+    "summary": 1
+  },
   "table_schema": [
     {
       "column_name": "Customer ID",
@@ -86,3 +91,6 @@ Use this metadata to infer the purpose of the table and generate meaningful desc
 
 **Your Task:**
 Using the provided metadata and table structure, output a JSON object containing a table description and schema, including all identified ID columns. Ensure the output is well-structured, accurate, and adheres to the format provided above. Do not include any text beyond the JSON.
+
+**Input**
+

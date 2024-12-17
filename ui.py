@@ -2,7 +2,7 @@ import streamlit as st
 import pandas as pd
 from io_tables import load_scraped_data, save_harvested_tables
 from extract_tables import harvest_tables_with_context
-from process_tables import load_initial_prompt, query_llm, cleanup_table, create_prompt
+from process_tables import load_initial_prompt, query_llm, cleanup_table, create_prompt, create_prompt_md
 
 # Load previously scraped raw data into session_state
 if "sources_data" not in st.session_state:
@@ -83,11 +83,11 @@ if process_button and selected_table is not None:
 
     # Compile a prompt
     prompt_start = load_initial_prompt()
-    prompt = create_prompt(df_precleaned, source_data['tables'][selected_table]['context'], prompt_start)
+    prompt = create_prompt_md(df_precleaned, source_data['tables'][selected_table]['context'], prompt_start)
     with st.expander(f"Prompt: {selected_table}"):
         st.write(prompt)
 
     # Query LLM - print response
     response = query_llm(prompt)
     with st.expander(f"Response: {selected_table}"):
-        st.write(response)
+        st.write(f"```json\n{response}\n```")

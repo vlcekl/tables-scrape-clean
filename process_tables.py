@@ -1,7 +1,9 @@
+import json
 import pandas as pd
 from enum import Enum
 from pydantic import BaseModel, Field
 import ollama
+
 
 class DataType(str, Enum):
     """Data types identified in the raw tabular data column"""
@@ -15,17 +17,20 @@ class TableSchema(BaseModel):
     data_type: DataType = Field(DataType.str_type, description="Identified data type - int, float, or str")
     description: str = Field(description="More informative description of a data column to be used by humans and LLMs.")
 
-class RowNumbers(BaseModel):
+class RowCounts(BaseModel):
     """Number of taw table rows corresponding to header, data, and summary"""
     header: int = Field(0, description="Number of rows used to define a header")
-    data: int = Field(0, description="Number of rows corresponding to data")
+    #data: int = Field(0, description="Number of rows corresponding to data")
     summary: int = Field(0, description="Number of rows corresponding to table summary statistics and footnotes")
 
 class TableMetadata(BaseModel):
     """Table metadata describing raw tabular data,
       including table descriptions, header and summary rows numbers, and table schema"""
     table_description: str = Field(description="Informative description of the table based on the table context and data. To be used by humans and LLMs.")
-    number_of_rows: RowNumbers = Field(description="Identified numbers of header, data, and summary rows")
+    #header_rows_identified: int = Field(0, description="Identified number of header rows. Can be zero, one, or more")
+    #data_rows_identified: int = Field(0, description="Identified number of data rows.")
+    #summary_rows_identified: int = Field(0, description="Identified number of summary rows. Can be zero, one, or more")
+    row_counts: RowCounts = Field(description="Identified numbers of header and summary rows")
     schema: list[TableSchema] = Field(description="Schema identified in raw tabular data")
     processing_info: str = Field(description="Information about raw data processing steps, such as how header, data, summary rows were identified, what context was used, and what choices were made.")
 
@@ -38,6 +43,7 @@ def create_tables_schema(dataset):
 
 def load_initial_prompt():
 
+    #with open('./prompts/prompt_b.md', 'r') as f:
     with open('./prompts/prompt_json_simple.md', 'r') as f:
         prompt = f.read()
 
@@ -59,16 +65,57 @@ def query_llm(prompt):
 
 def create_prompt(df, context, prompt):
 
+    # First part of the prompt
     full_prompt = prompt
 
-    full_prompt += "\n**Input Table (Raw)**\n"
+#    # Add JSON with a table + context
+#    full_prompt += "\n**Input Table (Raw)**\n"
+#
+#
+#    full_prompt += "\n\n**Context Information**\n\n"
+#
+#    for k, v in context.items():
+#        full_prompt += f"- **{k}**: {v}\n"
 
-    full_prompt += df.to_markdown(index=False)
+    # Move column names to first row
+    df.loc[-1] = df.columns
+    df.index = df.index + 1  # Shift the index
+    df = df.sort_index()  # Sort the index
 
-    full_prompt += "\n\n**Context Information**\n\n"
+    # Add new column names (col1 ... coln)
+    df.columns = [f"col{i}" for i in range(len(df.columns))]
+
+    # Convert table to dictionary with new column names
+    table_dict = df.to_dict(orient='records')
+
+    input_dict = {
+        "metadata": context,
+        "table": table_dict
+    }
+
+    data_prompt = json.dumps(input_dict, indent=4, default=str)
+    prompt = f"{prompt}\n```json\n{data_prompt}\n```"
+    print(prompt)
+
+    return prompt
+
+def create_prompt_md(df, context, prompt):
+
+    # First part of the prompt
+    full_prompt = prompt
+
+    # Add JSON with a table + context
+
+    full_prompt += "\n\n**Context**\n\n"
 
     for k, v in context.items():
         full_prompt += f"- **{k}**: {v}\n"
+
+    full_prompt += "\n**Table**\n"
+    full_prompt += df.to_markdown(index=True)
+    full_prompt += "\n"
+
+    print(full_prompt)
 
     return full_prompt
 
