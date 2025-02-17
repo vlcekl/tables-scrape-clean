@@ -1,7 +1,7 @@
 import streamlit as st
 import pandas as pd
 from io_tables import load_scraped_data, save_harvested_tables
-from extract_tables import harvest_tables_with_context
+from extract_tables_2 import harvest_tables_with_context
 from process_tables import load_initial_prompt, query_llm, cleanup_table, create_prompt, create_prompt_md
 
 # Load previously scraped raw data into session_state

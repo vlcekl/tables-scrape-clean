@@ -1,0 +1,12 @@
+Column_Name,Data_Type,Description,Example_Value
+Regulation_ID,Integer,Unique identifier for each policy or regulation entry,1
+Policy_Name,String,Official title or name of the policy/regulation,"Urgent Drought Measures Activation"
+Region,String,Geographical scope or targeted region of the policy,"Spain and Portugal (EU-Level)"
+Announcement_Date,String,Date when the policy was announced or reported,"24 May 2023"
+Effective_Date,String,Date or period when the policy becomes effective or is implemented,"Pending EC decision"
+Policy_Purpose,String,Main objectives and goals of the policy,"Activate CAP crisis reserve fund and increase advance payments to mitigate drought impacts"
+Investment_Estimate,String,Estimated investment or budget allocation if applicable,"~636 million euros (CAP aid budget)"
+Indicators,String,Key measurable indicators or metrics used to assess policy impact,"Drought intensity; water reservoir levels; CAP aid activation"
+Textual_Summary,String,A brief description summarizing the policy and its expected impact,"Spain and Portugal will jointly request urgent measures from the European Commission to ease drought effects by unlocking crisis funds and boosting payments to farmers."
+Source_Link,String,URL to the source or reference document,"https://www.lamoncloa.gob.es/lang/en/gobierno/news/paginas/2023/20230524_drought-measures.aspx"
+Policy_Type,String,Type or level of policy (e.g., EU-Level, National, Joint, Biotechnology),"Joint EU-Level"

@@ -1,0 +1,12 @@
+Column_Name,Data_Type,Description,Example_Value
+Regulation_ID,Integer,Unique identifier for each regulation or policy,1
+Policy_Name,String,Official name of the policy/regulation,"EU Deforestation Regulation (EUDR)"
+Region,String,Geographical scope or region covered by the policy,"EU (all member states)"
+Announcement_Date,String,Date on which the policy was announced,"31 May 2023"
+Effective_Date,String,Date or period when the policy becomes effective,"1 January 2023"
+Policy_Purpose,String,Main goals and objectives of the policy,"Ensure products are deforestation‐free"
+Investment_Estimate,String,Estimated investment amount if applicable,"2.1–2.4 billion euros"
+Indicators,String,Key measurable indicators or metrics used to assess the policy's impact,"Deforestation-free product verification; soil health metrics"
+Textual_Summary,String,Brief summary describing the policy and its expected impact,"EUDR requires due diligence to prevent deforestation"
+Source_Link,String,URL link to the source or further information,"https://eur-lex.europa.eu/eli/reg/2023/1115/oj"
+Policy_Type,String,Type or level of the policy (e.g., EU-Level, National, Regional, Joint),"EU-Level"

@@ -1,0 +1,15 @@
+2025-01-13 22:15:10,438 - lightrag - INFO - Logger initialized for working directory: ./dickens
+2025-01-13 22:15:10,440 - lightrag - INFO - Load KV llm_response_cache with 0 data
+2025-01-13 22:15:10,441 - lightrag - INFO - Load KV full_docs with 0 data
+2025-01-13 22:15:10,441 - lightrag - INFO - Load KV text_chunks with 0 data
+2025-01-13 22:15:10,445 - lightrag - INFO - Loaded document status storage with 0 records
+2025-01-13 22:30:01,462 - lightrag - INFO - Logger initialized for working directory: ./dickens
+2025-01-13 22:30:01,462 - lightrag - INFO - Load KV llm_response_cache with 0 data
+2025-01-13 22:30:01,463 - lightrag - INFO - Load KV full_docs with 0 data
+2025-01-13 22:30:01,463 - lightrag - INFO - Load KV text_chunks with 0 data
+2025-01-13 22:30:01,465 - lightrag - INFO - Loaded document status storage with 0 records
+2025-01-13 22:31:12,411 - lightrag - INFO - Logger initialized for working directory: ./dickens
+2025-01-13 22:31:12,412 - lightrag - INFO - Load KV llm_response_cache with 0 data
+2025-01-13 22:31:12,412 - lightrag - INFO - Load KV full_docs with 0 data
+2025-01-13 22:31:12,413 - lightrag - INFO - Load KV text_chunks with 0 data
+2025-01-13 22:31:12,415 - lightrag - INFO - Loaded document status storage with 0 records

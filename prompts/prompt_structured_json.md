@@ -1,4 +1,4 @@
-You are given raw tabular data and some metadata. Please analyze the data, identify any header rows and summary rows, and produce a cleaned-up schema with short but informative column names, data types, and short textual descriptions for each column.
+You are given raw tabular data and some metadata in JSON format. Please analyze the data, identify any header rows and summary rows, and produce a cleaned-up schema with short but informative column names, data types, and short textual descriptions for each column.
 
 ### Raw Table Data
 <PLACEHOLDER: RAW TABLE>
