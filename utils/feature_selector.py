@@ -12,15 +12,58 @@ import json
 import boto3
 import pandas as pd
 import lightgbm as lgb
-import mlflow
+from optuna.integration.lightgbm import LightGBMTunerCV
 from sklearn.metrics import roc_auc_score
+from sklearn.model_selection import GroupKFold
 from joblib import Parallel, delayed
+import mlflow
+
+
+# ----- LightGBM parameter selection/tuning -----
+def optimize_lgb_params(X_train, y_train, cfg, n_splits=5, time_budget=600):
+    """
+    Optimize LightGBM hyperparameters using Optuna's LightGBMTunerCV or use provided parameters.
+
+    Args:
+        X_train (pd.DataFrame): Training features.
+        y_train (pd.Series): Training labels.
+        cfg (dict): Configuration dictionary containing 'optimize_lgb' flag and 'lgb_params'.
+        n_splits (int): Number of cross-validation folds.
+        time_budget (int): Time budget for optimization in seconds.
+
+    Returns:
+        dict: Best hyperparameters found by Optuna or provided parameters.
+    """
+    # Check if optimization is enabled in the configuration
+    if cfg.get('optimize_lgb', True):
+        # Prepare dataset
+        dtrain = lgb.Dataset(X_train, label=y_train)
+
+        # Initialize KFold cross-validation
+        kf = GroupKFold(n_splits=n_splits, shuffle=True, random_state=42)
+
+        # Initialize the tuner
+        tuner = LightGBMTunerCV(
+            cfg['lgb_params'],
+            dtrain,
+            folds=kf.split(X_train, y_train, X_train[cfg['split']['column']]),
+            time_budget=time_budget,
+            verbosity=-1,
+        )
+
+        # Run the tuner
+        tuner.run()
+
+        # Return the best parameters
+        return tuner.best_params
+    else:
+        # Return provided parameters if optimization is skipped
+        return cfg.get('lgb_params', {})
 
 # ----- Data Loading and Splitting -----
 def load_and_split_data(cfg: dict):
     """
-    Read CSV tables from S3 as per cfg['tables'], merge them via cfg['joins'],
-    and split into train/validation based on cfg['split']['column'] and 'value'.
+    Read a CSV table from S3 and split it into train/validation based on cfg['split']['column'] and 'value'.
     Returns X_train, X_val, y_train, y_val.
     """
     # Load table with specified features
@@ -127,10 +170,10 @@ def hybrid_selection(prefilter: list,
 
 # ----- Main Pipeline -----
 def select_features(cfg: dict,
-                      X_train: pd.DataFrame,
-                      X_val: pd.DataFrame,
-                      y_train: pd.Series,
-                      y_val: pd.Series) -> list:
+                    X_train: pd.DataFrame,
+                    X_val: pd.DataFrame,
+                    y_train: pd.Series,
+                    y_val: pd.Series) -> list:
     """
     Orchestrate full feature engineering and selection.
 
@@ -151,12 +194,9 @@ def select_features(cfg: dict,
     # (ii) parameters provided in lgb_params item of cfg
     # (iii) optuna.integration.lightgbm.LightGBMTunerCV to find best params on the full dataset
     #TODO: modify the code below and write function that returns lgb_params and implements the above choices
+        # Step 1: Optimize LightGBM hyperparameters or use provided parameters
 
-    lgb_params = {
-        'objective':'binary', 'metric':'auc', 'learning_rate':0.05,
-        'verbose':-1, 'num_threads': n_jobs,
-        'num_boost_round':100, 'early_stopping_rounds':10
-    }
+    lgb_params = optimize_lgb_params(X_train, y_train, cfg)
 
     # Step 2: pre-filter by built-in importance
     bst = lgb.train(lgb_params, dtrain)
@@ -188,12 +228,12 @@ def select_features(cfg: dict,
 if __name__ == '__main__':
     # 1. Load configuration from S3
     s3 = boto3.client('s3')
-    obj = s3.get_object(Bucket='ml-config', Key='run_config.json')
+    obj = s3.get_object(Bucket='ml-config', Key='feature_select_config.json')
     cfg = json.load(obj['Body'])
 
     # 2. Read & merge tables, split into train/val
     X_train, X_val, y_train, y_val = load_and_split_data(cfg)
 
-    # 3. Run engineering pipeline
+    # 3. Run feature select pipeline
     final_features = select_features(cfg, X_train, X_val, y_train, y_val)
     print('Final features:', final_features)
