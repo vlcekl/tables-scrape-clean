@@ -15,6 +15,7 @@ from optuna.integration import LightGBMTunerCV, XGBoostPruningCallback
 def _tune_with_optuna(X_train, y_train, estimator_name, params, random_state, cv):
     """
     Tune estimator hyperparameters after Boruta selection using Optuna.
+    Integrates pruning callback for XGBoost trials.
     """
     if estimator_name.lower() == 'lightgbm':
         train_set = lgb.Dataset(X_train, label=y_train)
@@ -28,6 +29,7 @@ def _tune_with_optuna(X_train, y_train, estimator_name, params, random_state, cv
         )
         tuner.run()
         return tuner.best_params
+
     elif estimator_name.lower() == 'xgboost':
         def objective(trial):
             param = {
@@ -41,18 +43,33 @@ def _tune_with_optuna(X_train, y_train, estimator_name, params, random_state, cv
                 'subsample': trial.suggest_uniform('subsample', 0.5, 1.0),
                 'colsample_bytree': trial.suggest_uniform('colsample_bytree', 0.5, 1.0)
             }
-            model = XGBClassifier(**param)
+            model = XGBClassifier(**param, use_label_encoder=False, eval_metric='logloss', random_state=random_state)
             scores = []
             for train_ix, val_ix in cv.split(X_train):
-                model.fit(X_train[train_ix], y_train[train_ix], eval_set=[(X_train[val_ix], y_train[val_ix])],
-                          early_stopping_rounds=30, verbose=False)
-                scores.append(model.score(X_train[val_ix], y_train[val_ix]))
+                X_tr, X_val = X_train[train_ix], X_train[val_ix]
+                y_tr, y_val = y_train[train_ix], y_train[val_ix]
+                # Use pruning callback to stop unpromising trials early
+                model.fit(
+                    X_tr, y_tr,
+                    eval_set=[(X_val, y_val)],
+                    early_stopping_rounds=30,
+                    verbose=False,
+                    callbacks=[XGBoostPruningCallback(trial, "validation_0-logloss")]
+                )
+                scores.append(model.score(X_val, y_val))
             return np.mean(scores)
-        study = optuna.create_study(direction='maximize', sampler=optuna.samplers.TPESampler(seed=random_state))
+
+        study = optuna.create_study(
+            direction='maximize',
+            sampler=optuna.samplers.TPESampler(seed=random_state),
+            pruner=optuna.pruners.MedianPruner()
+        )
         study.optimize(objective, n_trials=20)
         return study.best_params
+
     else:
-        return params  # no tuning for RandomForest by default
+        # Default: return provided params for RandomForest
+        return params
 
 
 def strategy_a_time_series_selection(X, y,
@@ -76,7 +93,7 @@ def strategy_a_time_series_selection(X, y,
     def process_fold(fold, train_idx, test_idx):
         X_train, y_train = X[train_idx], y[train_idx]
         X_test, y_test = X[test_idx], y[test_idx]
-        with mlflow.start_run(run_name=f'fold_{fold}'):  # nested runs
+        with mlflow.start_run(run_name=f'fold_{fold}'):
             # Log fold and settings
             mlflow.log_params({
                 'outer_fold': fold,
@@ -145,8 +162,8 @@ if __name__ == '__main__':
     y = np.random.randint(0, 2, 1000)
     df = strategy_a_time_series_selection(
         X, y,
-        estimator_name='lightgbm',
-        base_params={'objective':'binary','metric':'binary_logloss'},
+        estimator_name='xgboost',
+        base_params={},
         n_outer_splits=5,
         forecast_horizon=100,
         n_inner_splits=3,
