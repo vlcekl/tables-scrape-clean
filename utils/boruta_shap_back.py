@@ -19,7 +19,6 @@ from sklearn.model_selection import ShuffleSplit, KFold
 from sklearn.base import BaseEstimator, TransformerMixin
 from BorutaShap import BorutaShap
 
-
 class YearRollingSplit:
     """Rolling-year split (train on all years < y, validate on year y)"""
     def __init__(self, n_splits: int = 4, years: pd.Series = None):
@@ -44,32 +43,6 @@ class YearRollingSplit:
             train_idx = np.where(split_years < year)[0]
             val_idx = np.where(split_years == year)[0]
             yield train_idx, val_idx
-
-class YearKFoldTrainSplit:
-    """
-    Inner CV: keep the last year as validation, and do K random train/test splits within the earlier years.
-    """
-    def __init__(self, years: pd.Series, n_splits: int = 4, random_state: int = 42):
-        self.years = np.array(years)
-        self.unique_years = sorted(np.unique(self.years))
-        self.test_year = self.unique_years[-1]
-        self.n_splits = n_splits
-        self.random_state = random_state
-
-    def get_n_splits(self, X=None, y=None, years=None):
-        return self.n_splits
-
-    def split(self, X, y=None, years=None):
-        # indices for train-validation subsampling
-        train_idx_full = np.where(self.years < self.test_year)[0]
-        test_idx = np.where(self.years == self.test_year)[0]
-        ks = KFold(
-            n_splits=self.n_splits,
-            random_state=self.random_state
-        )
-        for tr_idx, _ in ks.split(train_idx_full):
-            tr = train_idx_full[tr_idx]
-            yield tr, test_idx
 
 class YearRandomTrainSplit:
     """
@@ -114,7 +87,6 @@ def make_estimator(name: str, problem: str, params: dict, random_state: int):
     Model = RandomForestClassifier if problem in ['binary', 'multiclass'] else RandomForestRegressor
     params['n_jobs'] = params.get('n_jobs', -1)
     return Model(**params)
-
 
 # Logging helpers
 
@@ -216,7 +188,6 @@ class BorutaStep(BaseEstimator, TransformerMixin):
 
     def transform(self, X: pd.DataFrame):
         return X.loc[:, X.columns[self.support_]]
-
 
 class BorutaSHAPStep(BaseEstimator, TransformerMixin):
     """
@@ -364,7 +335,7 @@ class FinalEstimator(BaseEstimator):
         return self.model_.predict_proba(X)
 
 
-# Build pipeline using YearRandomTrainSplit for inner CV
+# Build pipeline using YearKFoldTrainSplit for inner CV
 
 def build_pipeline(
     estimator_name, problem_type, base_params,
@@ -381,14 +352,12 @@ def build_pipeline(
         steps.append(('tune_before', Tuner(estimator_name, problem_type, base_params,
                                            prefix='pre_', cv=inner_cv,
                                            random_state=random_state)))
-    if boruta_shap:
-        steps.append(('borutashap', BorutaSHAPStep(
+    steps.append(('borutashap', BorutaSHAPStep(
             model='lightgbm', importance_measure='shap', classification=(problem_type in ['binary','multiclass']),
             percentile=80, iterations=50, random_state=42
     )))
-    else:
-        steps.append(('boruta', BorutaStep(estimator_name, problem_type,
-                                            random_state, boruta_max_iter, n_jobs=-1)))
+#    steps.append(('boruta', BorutaStep(estimator_name, problem_type,
+#                                            random_state, boruta_max_iter, n_jobs=-1)))
     if tune_after_fs:
         steps.append(('tune_after', Tuner(estimator_name, problem_type, base_params,
                                           prefix='mid_', cv=inner_cv,
