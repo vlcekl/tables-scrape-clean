@@ -1,92 +1,22 @@
 import numpy as np
 import pandas as pd
+
 from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.pipeline import Pipeline
-from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
-from xgboost import XGBClassifier, XGBRegressor
-import lightgbm as lgb
-from boruta import BorutaPy
-import mlflow
-from joblib import Parallel, delayed
-import optuna
-from optuna.integration import LightGBMTunerCV, XGBoostPruningCallback
+from sklearn.model_selection import ShuffleSplit
 from sklearn.metrics import (
     accuracy_score, precision_score, recall_score, f1_score,
     roc_auc_score, average_precision_score,
     mean_squared_error, mean_absolute_error, r2_score
 )
-from sklearn.model_selection import ShuffleSplit, KFold
-from sklearn.base import BaseEstimator, TransformerMixin
+from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
+import xgboost as xgb
+import lightgbm as lgb
 from BorutaShap import BorutaShap
-
-class YearRollingSplit:
-    """Rolling-year split (train on all years < y, validate on year y)"""
-    def __init__(self, n_splits: int = 4, years: pd.Series = None):
-        self.n_splits = n_splits
-        self.years = years
-
-    def get_n_splits(self, X=None, y=None):
-        return self.n_splits
-
-    def split(self, X, y=None, years: pd.Series = None):
-        if years is None:
-            split_years = np.array(self.years)
-        else:
-            split_years = np.array(years)
-
-        unique_years = sorted(np.unique(split_years))
-        i_min = max(1, len(unique_years) - self.n_splits)
-
-        # iterate over years and return up to n_split latest splits
-        for i, year in enumerate(unique_years):
-            if i < i_min: continue
-            train_idx = np.where(split_years < year)[0]
-            val_idx = np.where(split_years == year)[0]
-            yield train_idx, val_idx
-
-class YearRandomTrainSplit:
-    """
-    Inner CV: keep the last year as validation, and do K random train/test splits within the earlier years.
-    """
-    def __init__(self, years: pd.Series, n_splits: int = 4, train_fraction: float = 0.75, random_state: int = 42):
-        self.years = np.array(years)
-        self.unique_years = sorted(np.unique(self.years))
-        self.test_year = self.unique_years[-1]
-        self.n_splits = n_splits
-        self.train_fraction = train_fraction
-        self.random_state = random_state
-
-    def get_n_splits(self, X=None, y=None, years=None):
-        return self.n_splits
-
-    def split(self, X, y=None, years=None):
-        # indices for train-validation subsampling
-        train_idx_full = np.where(self.years < self.test_year)[0]
-        test_idx = np.where(self.years == self.test_year)[0]
-        rs = ShuffleSplit(
-            n_splits=self.n_splits,
-            train_size=self.train_fraction,
-            random_state=self.random_state
-        )
-        for tr_idx, _ in rs.split(train_idx_full):
-            tr = train_idx_full[tr_idx]
-            yield tr, test_idx
-
-# Common estimator factory
-
-def make_estimator(name: str, problem: str, params: dict, random_state: int):
-    params = params.copy()
-    if 'random_state' not in params and 'seed' not in params:
-        params['random_state'] = random_state
-    if name.lower() == 'xgboost':
-        Model = XGBClassifier if problem in ['binary', 'multiclass'] else XGBRegressor
-        return Model(**params, tree_method='hist')
-    if name.lower() == 'lightgbm':
-        Model = lgb.LGBMClassifier if problem in ['binary', 'multiclass'] else lgb.LGBMRegressor
-        return Model(**params)
-    Model = RandomForestClassifier if problem in ['binary', 'multiclass'] else RandomForestRegressor
-    params['n_jobs'] = params.get('n_jobs', -1)
-    return Model(**params)
+import optuna
+from optuna.integration import LightGBMTunerCV, XGBoostPruningCallback
+from joblib import Parallel, delayed
+import mlflow
 
 # Logging helpers
 
@@ -99,14 +29,216 @@ def compute_and_log_metrics(y_true, y_pred, y_proba, metrics: dict):
         val = fn(y_true, y_proba if needs_proba else y_pred)
         log_metric(name, val)
 
+# Named metric functions for picklability
 
-# Tuning helper
+def precision_macro(y_true, y_pred):
+    return precision_score(y_true, y_pred, average='macro')
+
+def recall_macro(y_true, y_pred):
+    return recall_score(y_true, y_pred, average='macro')
+
+def f1_macro(y_true, y_pred):
+    return f1_score(y_true, y_pred, average='macro')
+
+def roc_auc_ovr(y_true, y_proba):
+    return roc_auc_score(y_true, y_proba, average='macro', multi_class='ovr')
+
+def pr_auc_macro(y_true, y_proba):
+    return average_precision_score(y_true, y_proba, average='macro')
+
+# Custom CV splitters
+
+class YearRollingSplit:
+    """Rolling-year split (train on all years < y, validate on year y)"""
+    def __init__(self, n_splits: int = 4, years: pd.Series = None):
+        self.n_splits = n_splits
+        self.years = np.array(years) if years is not None else None
+
+    def get_n_splits(self, X=None, y=None):
+        return sum(1 for _ in self.split(X, y))
+
+    def split(self, X, y=None, years: pd.Series = None):
+        split_years = np.array(years) if years is not None else self.years
+        unique_years = sorted(np.unique(split_years))
+        i_min = max(1, len(unique_years) - self.n_splits)
+        for i, year in enumerate(unique_years):
+            if i < i_min:
+                continue
+            train_idx = np.where(split_years < year)[0]
+            val_idx = np.where(split_years == year)[0]
+            yield train_idx, val_idx
+
+class YearRandomTrainSplit:
+    """
+    Inner CV: keep the last year as validation, and do K random train/test splits within the earlier years.
+    """
+    def __init__(self, years: pd.Series, n_splits: int = 4, train_fraction: float = 0.75, random_state: int = 42):
+        self.years = np.array(years)
+        self.n_splits = n_splits
+        self.train_fraction = train_fraction
+        self.random_state = random_state
+
+    def get_n_splits(self, X=None, y=None, years: pd.Series = None):
+        return self.n_splits
+
+    def split(self, X, y=None, years: pd.Series = None):
+        arr_years = np.array(years) if years is not None else self.years
+        unique_years = sorted(np.unique(arr_years))
+        test_year = unique_years[-1]
+        train_idx_full = np.where(arr_years < test_year)[0]
+        test_idx = np.where(arr_years == test_year)[0]
+        rs = ShuffleSplit(
+            n_splits=self.n_splits,
+            train_size=self.train_fraction,
+            random_state=self.random_state
+        )
+        for tr_idx, _ in rs.split(train_idx_full):
+            tr = train_idx_full[tr_idx]
+            yield tr, test_idx
+
+# Estimator factory with defensive copying
+
+def make_estimator(name: str, problem: str, params: dict, random_state: int):
+    params_copy = params.copy()
+    if 'random_state' not in params_copy and 'seed' not in params_copy:
+        params_copy['random_state'] = random_state
+    if name.lower() == 'xgboost':
+        Model = xgb.XGBClassifier if problem in ['binary', 'multiclass'] else xgb.XGBRegressor
+        return Model(**params_copy, tree_method='hist')
+    if name.lower() == 'lightgbm':
+        Model = lgb.LGBMClassifier if problem in ['binary', 'multiclass'] else lgb.LGBMRegressor
+        return Model(**params_copy)
+    Model = RandomForestClassifier if problem in ['binary', 'multiclass'] else RandomForestRegressor
+    params_copy['n_jobs'] = params_copy.get('n_jobs', -1)
+    return Model(**params_copy)
+
+# XGBoostTunerCV corrected
+
+class XGBoostTunerCV(BaseEstimator, TransformerMixin):
+    def __init__(
+        self,
+        params,
+        train_set=None,
+        folds=None,
+        n_trials=100,
+        time_budget=None,
+        random_state=42,
+        early_stopping_rounds=50,
+        use_pruning=False
+    ):
+        self.params = params.copy()
+        self.train_set = train_set
+        self.folds = folds
+        self.n_trials = n_trials
+        self.time_budget = time_budget
+        self.random_state = random_state
+        self.early_stopping_rounds = early_stopping_rounds
+        self.use_pruning = use_pruning
+
+    def fit(self, X=None, y=None):
+        # Prepare training data
+        if self.train_set is None:
+            if X is None or y is None:
+                raise ValueError("X and y must be provided if train_set is not set.")
+            dtrain = xgb.DMatrix(X, label=y)
+        else:
+            dtrain = self.train_set
+
+        base_params = {k: v for k, v in self.params.items() if k not in ['eta', 'num_boost_round']}
+        callbacks = []
+        if self.time_budget is not None:
+            callbacks.append(optuna.integration.MaxTimeCallback(self.time_budget))
+
+        def manual_cv(p, num_round, trial=None):
+            if isinstance(self.folds, int) or self.folds is None:
+                nfold = self.folds or 3
+                cvres = xgb.cv(
+                    p, dtrain,
+                    nfold=nfold,
+                    num_boost_round=num_round,
+                    early_stopping_rounds=self.early_stopping_rounds,
+                    seed=self.random_state,
+                    metrics=p.get('eval_metric', 'rmse')
+                )
+                return cvres
+            if hasattr(self.folds, 'split'):
+                splits = list(self.folds.split(X, y))
+            else:
+                splits = self.folds
+            results = []
+            for tr_idx, val_idx in splits:
+                dtr = xgb.DMatrix(X.iloc[tr_idx], label=y.iloc[tr_idx])
+                dval = xgb.DMatrix(X.iloc[val_idx], label=y.iloc[val_idx])
+                local_callbacks = []
+                if self.use_pruning and trial is not None:
+                    local_callbacks.append(
+                        XGBoostPruningCallback(trial, f'validation-{p.get("eval_metric","rmse")}-mean')
+                    )
+                bst = xgb.train(
+                    p,
+                    dtr,
+                    num_boost_round=num_round,
+                    evals=[(dval, 'validation')],
+                    early_stopping_rounds=self.early_stopping_rounds,
+                    callbacks=local_callbacks,
+                    verbose_eval=False
+                )
+                results.append(bst.best_score)
+            import pandas as pd
+            metric = p.get('eval_metric', 'rmse')
+            return pd.DataFrame({f'test-{metric}-mean': [sum(results)/len(results)]})
+
+        def objective(trial):
+            p = base_params.copy()
+            p['max_depth'] = trial.suggest_int('max_depth', 3, 12)
+            p['min_child_weight'] = trial.suggest_int('min_child_weight', 1, 10)
+            p['subsample'] = trial.suggest_float('subsample', 0.5, 1.0)
+            p['colsample_bytree'] = trial.suggest_float('colsample_bytree', 0.5, 1.0)
+            p['reg_alpha'] = trial.suggest_loguniform('reg_alpha', 1e-8, 10.0)
+            p['reg_lambda'] = trial.suggest_loguniform('reg_lambda', 1e-8, 10.0)
+            p['eta'] = trial.suggest_loguniform('eta', 1e-3, 1e-1)
+            num_round = trial.suggest_int('num_boost_round', 30, 1000)
+            cvres = manual_cv(p, num_round, trial if self.use_pruning else None)
+            self.best_iteration_ = int(cvres.index[-1])
+            return cvres.iloc[-1, 0]
+
+        direction = 'minimize' if self.params.get('objective', '').startswith('reg') else 'maximize'
+        self.study_ = optuna.create_study(
+            direction=direction,
+            sampler=optuna.samplers.TPESampler(seed=self.random_state)
+        )
+        self.study_.optimize(objective, n_trials=self.n_trials, callbacks=callbacks)
+
+        self.best_params_ = self.study_.best_params.copy()
+        if not hasattr(self, 'best_iteration_'):
+            self.best_iteration_ = None
+        self.booster_ = xgb.train(
+            {**self.params, **self.best_params_},
+            dtrain,
+            num_boost_round=self.best_iteration_
+        )
+        return self
+
+    def transform(self, X):
+        return X
+
+    def get_best_params(self):
+        return self.study_.best_params.copy()
+
+    def get_best_iteration(self):
+        return self.best_iteration_
+
+    def get_best_booster(self):
+        return self.booster_
+
+# Tuner corrected to propagate parameters
+
 class Tuner(BaseEstimator, TransformerMixin):
     def __init__(self, estimator_name, problem_type, base_params,
                  prefix, cv, random_state, n_trials=50, early_stop=50):
         self.estimator_name = estimator_name
         self.problem_type = problem_type
-        self.base_params = base_params or {}
+        self.base_params = base_params.copy()
         self.prefix = prefix
         self.cv = cv
         self.random_state = random_state
@@ -115,13 +247,15 @@ class Tuner(BaseEstimator, TransformerMixin):
 
     def fit(self, X: pd.DataFrame, y: pd.Series=None):
         best = self._tune(X, y)
-        self.best_params_ = best
+        # update shared base_params so downstream estimators pick them up
+        self.base_params.update(best)
         return self
 
-    def transform(self, X: pd.DataFrame): return X
+    def transform(self, X: pd.DataFrame):
+        return X
 
     def _tune(self, X, y):
-        params = {**self.base_params}
+        params = self.base_params.copy()
         if self.estimator_name.lower() == 'lightgbm':
             params.setdefault('verbosity', -1)
             params['n_estimators'] = None
@@ -131,63 +265,22 @@ class Tuner(BaseEstimator, TransformerMixin):
                 verbose_eval=False, seed=self.random_state)
             tuner.run()
             booster = tuner.get_best_booster()
-            best = tuner.best_params
+            best = tuner.best_params.copy()
             best['n_estimators'] = booster.best_iteration
         elif self.estimator_name.lower() == 'xgboost':
-            def objective(trial):
-                p = {'verbosity':0, 'random_state':self.random_state}
-                if self.problem_type == 'binary':
-                    p.update({'objective':'binary:logistic','eval_metric':'logloss'})
-                elif self.problem_type == 'multiclass':
-                    p.update({'objective':'multi:softprob','eval_metric':'mlogloss','num_class':len(np.unique(y))})
-                else:
-                    p.update({'objective':'reg:squarederror','eval_metric':'rmse'})
-                p['max_depth'] = trial.suggest_int('max_depth', 3, 15)
-                p['learning_rate'] = trial.suggest_float('learning_rate', 1e-4, 1e-1, log=True)
-                p['n_estimators'] = trial.suggest_int('n_estimators', 100, 1000)
-                model = make_estimator('xgboost', self.problem_type, p, self.random_state)
-                scores = []
-                for tr, val in self.cv.split(X, y):
-                    model.fit(
-                        X.iloc[tr], y.iloc[tr],
-                        eval_set=[(X.iloc[val], y.iloc[val])],
-                        early_stopping_rounds=self.early_stop,
-                        callbacks=[XGBoostPruningCallback(trial, 'validation_0-logloss')],
-                        verbose=False)
-                    pred = model.predict(X.iloc[val])
-                    if self.problem_type in ['binary','multiclass']:
-                        scores.append(np.mean(pred == y.iloc[val]))
-                    else:
-                        scores.append(-np.sqrt(((pred - y.iloc[val])**2).mean()))
-                return np.mean(scores)
-            study = optuna.create_study(direction='maximize', sampler=optuna.samplers.TPESampler(seed=self.random_state))
-            study.optimize(objective, n_trials=self.n_trials)
-            best = study.best_params
+            tuner = XGBoostTunerCV(
+                params, xgb.DMatrix(X, label=y), folds=self.cv,
+                early_stopping_rounds=self.early_stop,
+                n_trials=self.n_trials, time_budget=None,
+                random_state=self.random_state,
+                use_pruning=False)
+            tuner.fit()
+            best = tuner.get_best_params()
+            best['n_estimators'] = tuner.get_best_iteration()
         else:
             best = params.copy()
-        prefixed = {f"{self.prefix}{k}": v for k, v in best.items()}
-        log_params(prefixed)
         return best
 
-
-class BorutaStep(BaseEstimator, TransformerMixin):
-    def __init__(self, estimator_name, problem_type, random_state, max_iter, n_jobs=1):
-        self.estimator_name = estimator_name
-        self.problem_type = problem_type
-        self.random_state = random_state
-        self.max_iter = max_iter
-        self.n_jobs = n_jobs
-
-    def fit(self, X: pd.DataFrame, y: pd.Series=None):
-        est = make_estimator(self.estimator_name, self.problem_type, {}, self.random_state)
-        boruta = BorutaPy(est, n_estimators='auto', max_iter=self.max_iter,
-                          random_state=self.random_state, n_jobs=self.n_jobs)
-        boruta.fit(X.values, y.values)
-        self.support_ = boruta.support_
-        return self
-
-    def transform(self, X: pd.DataFrame):
-        return X.loc[:, X.columns[self.support_]]
 
 class BorutaSHAPStep(BaseEstimator, TransformerMixin):
     """
@@ -354,10 +447,8 @@ def build_pipeline(
                                            random_state=random_state)))
     steps.append(('borutashap', BorutaSHAPStep(
             model='lightgbm', importance_measure='shap', classification=(problem_type in ['binary','multiclass']),
-            percentile=80, iterations=50, random_state=42
+            percentile=80, iterations=boruta_max_iter, random_state=random_state
     )))
-#    steps.append(('boruta', BorutaStep(estimator_name, problem_type,
-#                                            random_state, boruta_max_iter, n_jobs=-1)))
     if tune_after_fs:
         steps.append(('tune_after', Tuner(estimator_name, problem_type, base_params,
                                           prefix='mid_', cv=inner_cv,
@@ -440,7 +531,8 @@ if __name__ == '__main__':
         X_cls, y_cls, years=years,
         estimator_name='randomforest', problem_type='multiclass',
         base_params={}, n_splits=5, boruta_max_iter=100,
-        random_state=0, n_jobs=2,
+        tune_before_fs=False, tune_after_fs=True,
+        random_state=0, n_jobs=8,
         metrics=default_metrics, metric_name='accuracy',
         inner_splits=4, train_fraction=0.75
     )
@@ -463,7 +555,8 @@ if __name__ == '__main__':
         X_reg, y_reg, years=years,
         estimator_name='randomforest', problem_type='regression',
         base_params={}, n_splits=5, boruta_max_iter=100,
-        random_state=0, n_jobs=2,
+        tune_before_fs=False, tune_after_fs=True,
+        random_state=0, n_jobs=8,
         metrics=default_metrics, metric_name='mse',
         inner_splits=4, train_fraction=0.75
     )
