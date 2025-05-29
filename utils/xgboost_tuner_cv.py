@@ -1,196 +1,157 @@
-from sklearn.base import BaseEstimator, TransformerMixin
-import optuna
+import pandas as pd
 import xgboost as xgb
+import optuna
 from optuna.integration import XGBoostPruningCallback
 
-class XGBoostTunerCV(BaseEstimator, TransformerMixin):
+
+class XGBoostTunerCV:
     """
-    Single-study hyperparameter tuner for XGBoost mimicking LightGBMTunerCV interface,
-    with optional pruning via XGBoostPruningCallback.
+    An Optuna-based tuner for XGBoost (CV + pruning), inspired by LightGBMTunerCV.
+
+    Methods mirror LightGBMTunerCV: fit/run, get_best_params, get_best_iteration, get_best_booster.
 
     Parameters
     ----------
     params : dict
-        Initial parameters for XGBoost (e.g., objective, eval_metric).
-    train_set : xgb.DMatrix, optional (default=None)
-        Pre-constructed training DMatrix. If None, X and y must be passed to fit().
-    folds : int or cross-validation splitter or list of (train_idx, val_idx), optional
-        Custom folds. If int, interpreted as nfold for xgb.cv; if splitter,
-        used to generate indices; if list, passed directly to xgb.cv via `folds`.
+        Base XGBoost parameters (without 'eta' or 'num_boost_round').
+    folds : int, cross-validator or list of (train_idx, valid_idx), default=3
+        Number of CV folds, or custom splitter, or list of index tuples.
     n_trials : int, default=100
-        Total number of trials for the optimization.
-    time_budget : float, optional
-        Maximum time (in seconds) for the optimization; stops when elapsed.
-    random_state : int, default=42
-        Random seed.
+        Number of Optuna trials.
+    time_budget : float or None
+        Time budget in seconds for tuning. None means no limit.
+    seed : int, default=42
+        Seed for reproducibility.
     early_stopping_rounds : int, default=50
-        Early stopping rounds for the CV call.
+        Rounds for early stopping in CV.
     use_pruning : bool, default=False
-        Whether to enable XGBoostPruningCallback for trial pruning.
-
-    Attributes
-    ----------
-    best_params_ : dict
-        Best parameters found (excluding num_boost_round).
-    best_iteration_ : int
-        Optimal number of boosting rounds from CV.
-    booster_ : xgb.Booster
-        Final booster trained on all training data.
-    study_ : optuna.study.Study
-        The Optuna study object.
+        Whether to enable Optuna pruning via XGBoostPruningCallback.
     """
     def __init__(
         self,
-        params,
-        train_set=None,
+        params: dict,
         folds=None,
-        n_trials=100,
-        time_budget=None,
-        random_state=42,
-        early_stopping_rounds=50,
-        use_pruning=False
+        n_trials: int = 100,
+        time_budget: float = None,
+        seed: int = 42,
+        early_stopping_rounds: int = 50,
+        use_pruning: bool = False
     ):
         self.params = params.copy()
-        self.train_set = train_set
-        self.folds = folds
+        self.folds = folds if folds is not None else 3
         self.n_trials = n_trials
         self.time_budget = time_budget
-        self.random_state = random_state
+        self.seed = seed
         self.early_stopping_rounds = early_stopping_rounds
         self.use_pruning = use_pruning
 
-    def fit(self, X=None, y=None):
-        # Prepare training data
-        if self.train_set is None:
-            if X is None or y is None:
-                raise ValueError("X and y must be provided if train_set is not set.")
-            dtrain = xgb.DMatrix(X, label=y)
-        else:
-            dtrain = self.train_set
+    def _prepare_dmatrix(self, X, y):
+        if hasattr(self, 'train_set') and self.train_set is not None:
+            return self.train_set
+        return xgb.DMatrix(X, label=y)
 
+    def _iterate_splits(self, X, y):
+        if isinstance(self.folds, int):
+            return None  # Use built-in cv
+        if hasattr(self.folds, 'split'):
+            cv = self.folds.split(X, y)
+        else:
+            cv = self.folds
+        for train_idx, valid_idx in cv:
+            dtr = xgb.DMatrix(X.iloc[train_idx], label=y.iloc[train_idx])
+            dval = xgb.DMatrix(X.iloc[valid_idx], label=y.iloc[valid_idx])
+            yield dtr, dval
+
+    def _run_cv(self, params_trial, num_boost_round, X, y, trial=None):
+        metric = params_trial.get('eval_metric', 'rmse')
+        if isinstance(self.folds, int):
+            return xgb.cv(
+                params_trial,
+                self._prepare_dmatrix(X, y),
+                num_boost_round=num_boost_round,
+                nfold=self.folds,
+                seed=self.seed,
+                metrics=[metric],
+                early_stopping_rounds=self.early_stopping_rounds,
+                verbose_eval=False
+            )
+        scores = []
+        for dtrain_split, dvalid_split in self._iterate_splits(X, y):
+            cbs = []
+            if self.use_pruning and trial is not None:
+                cbs.append(XGBoostPruningCallback(trial, f'validation-{metric}-mean'))
+            bst = xgb.train(
+                params_trial,
+                dtrain_split,
+                num_boost_round=num_boost_round,
+                evals=[(dvalid_split, 'validation')],
+                early_stopping_rounds=self.early_stopping_rounds,
+                callbacks=cbs,
+                verbose_eval=False
+            )
+            scores.append(bst.best_score)
+        return pd.DataFrame({f'test-{metric}-mean': [sum(scores) / len(scores)]})
+
+    def fit(self, X=None, y=None, train_set=None):
+        """
+        Tune hyperparameters with Optuna and train final booster.
+        Alias: run()
+        """
+        if train_set is not None:
+            self.train_set = train_set
+        self._X, self._y = X, y
         base_params = {k: v for k, v in self.params.items() if k not in ['eta', 'num_boost_round']}
 
-        # Optional time callback
-        callbacks = []
-        if self.time_budget is not None:
-            callbacks.append(optuna.integration.MaxTimeCallback(self.time_budget))
-
-        # Helper for CV: manual CV to support pruning
-        def manual_cv(p, num_round, trial=None):
-            # create folds
-            if isinstance(self.folds, int) or self.folds is None:
-                nfold = self.folds or 3
-                cvres = xgb.cv(
-                    p, dtrain,
-                    nfold=nfold,
-                    num_boost_round=num_round,
-                    early_stopping_rounds=self.early_stopping_rounds,
-                    seed=self.random_state,
-                    metrics=p.get('eval_metric', 'rmse')
-                )
-                return cvres
-            # generate indices
-            if hasattr(self.folds, 'split'):
-                splits = list(self.folds.split(X, y))
-            else:
-                splits = self.folds
-            results = []
-            for fold_idx, (tr_idx, val_idx) in enumerate(splits):
-                dtr = xgb.DMatrix(X.iloc[tr_idx], label=y.iloc[tr_idx])
-                dval = xgb.DMatrix(X.iloc[val_idx], label=y.iloc[val_idx])
-                local_callbacks = []
-                if self.use_pruning and trial is not None:
-                    local_callbacks.append(
-                        XGBoostPruningCallback(trial, f'validation-{p.get("eval_metric","rmse")}-mean')
-                    )
-                bst = xgb.train(
-                    p,
-                    dtr,
-                    num_boost_round=num_round,
-                    evals=[(dval, 'validation')],
-                    early_stopping_rounds=self.early_stopping_rounds,
-                    callbacks=local_callbacks,
-                    verbose_eval=False
-                )
-                results.append(bst.best_score)
-            # wrap into DataFrame-like with mean
-            import pandas as pd
-            metric = p.get('eval_metric', 'rmse')
-            return pd.DataFrame({f'test-{metric}-mean': [sum(results)/len(results)]})
-
-        # Objective: tune joint parameters
-        def objective(trial):
-            p = base_params.copy()
-            p['max_depth'] = trial.suggest_int('max_depth', 3, 12)
-            p['min_child_weight'] = trial.suggest_int('min_child_weight', 1, 10)
-            p['subsample'] = trial.suggest_float('subsample', 0.5, 1.0)
-            p['colsample_bytree'] = trial.suggest_float('colsample_bytree', 0.5, 1.0)
-            p['reg_alpha'] = trial.suggest_loguniform('reg_alpha', 1e-8, 10.0)
-            p['reg_lambda'] = trial.suggest_loguniform('reg_lambda', 1e-8, 10.0)
-            p['eta'] = trial.suggest_loguniform('eta', 1e-3, 1e-1)
+        def objective(trial: optuna.trial.Trial) -> float:
+            params_trial = base_params.copy()
+            params_trial.update({
+                'max_depth': trial.suggest_int('max_depth', 3, 12),
+                'min_child_weight': trial.suggest_int('min_child_weight', 1, 10),
+                'subsample': trial.suggest_float('subsample', 0.5, 1.0),
+                'colsample_bytree': trial.suggest_float('colsample_bytree', 0.5, 1.0),
+                'reg_alpha': trial.suggest_loguniform('reg_alpha', 1e-8, 10.0),
+                'reg_lambda': trial.suggest_loguniform('reg_lambda', 1e-8, 10.0),
+                'eta': trial.suggest_loguniform('eta', 1e-3, 1e-1)
+            })
             num_round = trial.suggest_int('num_boost_round', 30, 1000)
-            cvres = manual_cv(p, num_round, trial if self.use_pruning else None)
-            self.best_iteration_ = int(cvres[f'test-{p.get("eval_metric","rmse")}-mean'].index[-1])
-            return cvres.iloc[-1, 0]
+            cvres = self._run_cv(params_trial, num_round, X, y, trial if self.use_pruning else None)
+            self.best_iteration = int(cvres.index[-1])
+            return float(cvres.iloc[-1, 0])
 
         direction = 'minimize' if self.params.get('objective', '').startswith('reg') else 'maximize'
-        self.study_ = optuna.create_study(
+        study = optuna.create_study(
             direction=direction,
-            sampler=optuna.samplers.TPESampler(seed=self.random_state)
+            sampler=optuna.samplers.TPESampler(seed=self.seed)
         )
-        self.study_.optimize(objective, n_trials=self.n_trials, callbacks=callbacks)
+        if self.time_budget:
+            study.optimize(objective, n_trials=self.n_trials, timeout=self.time_budget)
+        else:
+            study.optimize(objective, n_trials=self.n_trials)
 
-        self.best_params_ = self.study_.best_params.copy()
-        # ensure best_iteration exists
-        if not hasattr(self, 'best_iteration_'):
-            self.best_iteration_ = None
-        # Train final booster
-        self.booster_ = xgb.train(
-            self.best_params_, dtrain,
-            num_boost_round=self.best_iteration_
+        self.study = study
+        self.best_params = study.best_params.copy()
+
+        dtrain = self._prepare_dmatrix(X, y)
+        final_params = {**self.params, **self.best_params}
+        self.booster = xgb.train(
+            final_params,
+            dtrain,
+            num_boost_round=self.best_iteration
         )
         return self
 
-    def run(self, X=None, y=None):
-        return self.fit(X, y)
+    # alias for LightGBMTunerCV compatibility
+    run = fit
 
-    def transform(self, X):
-        return X
+    def get_best_params(self) -> dict:
+        return self.best_params.copy()
 
-    def get_best_params(self):
-        return self.best_params_
+    def get_best_iteration(self) -> int:
+        return self.best_iteration
 
-    def get_best_iteration(self):
-        return self.best_iteration_
+    def get_booster(self) -> xgb.Booster:
+        return self.booster
 
-    def get_best_booster(self):
-        return self.booster_
-
-
-if __name__ == '__main__':
-    import pandas as pd
-    from sklearn.datasets import load_breast_cancer
-    from sklearn.model_selection import KFold
-    from sklearn.metrics import roc_auc_score
-
-    data = load_breast_cancer()
-    X = pd.DataFrame(data.data, columns=data.feature_names)
-    y = pd.Series(data.target)
-    kf = KFold(n_splits=3, shuffle=True, random_state=0)
-    dtrain = xgb.DMatrix(X, label=y)
-
-    tuner = XGBoostTunerCV(
-        params={'objective': 'binary:logistic', 'eval_metric': 'auc'},
-        train_set=dtrain,
-        folds=kf,
-        n_trials=100,
-        time_budget=600,
-        random_state=0,
-        early_stopping_rounds=20,
-        use_pruning=True
-    )
-    tuner.fit(X, y)
-    print("Best params:", tuner.get_best_params())
-    print("Best iteration:", tuner.get_best_iteration())
-    preds = tuner.get_best_booster().predict(dtrain)
-    print("AUC:", roc_auc_score(y, preds))
+    # alias method
+    def get_best_booster(self) -> xgb.Booster:
+        return self.get_booster()
