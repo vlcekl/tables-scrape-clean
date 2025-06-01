@@ -11,68 +11,158 @@ from lightgbm import LGBMRegressor
 from sklearn.model_selection import GridSearchCV
 from sklearn.feature_selection import SelectFromModel
 
-# --- Two-stage feature selectors ---
+import numpy as np
+from sklearn.base import BaseEstimator, TransformerMixin
+from sklearn.feature_selection import SelectFromModel
+from sklearn.model_selection import GridSearchCV
+from sklearn.pipeline import Pipeline
+from lightgbm import LGBMClassifier
+import mlflow
+import mlflow.sklearn
+
+# Enable autologging
+mlflow.sklearn.autolog()
+
 class AllRelevantSelector(BaseEstimator, TransformerMixin):
     def __init__(self, param_grid):
         self.param_grid = param_grid
 
-    def fit(self, X, y=None):
-        gs = GridSearchCV(LGBMRegressor(), self.param_grid, cv=3, n_jobs=-1)
-        gs.fit(X, y)
-        self.best_params_ = gs.best_params_
+    def fit(self, X, y):
+        # Stage 1: hyperparameter search
+        gs = GridSearchCV(
+            estimator=LGBMClassifier(),
+            param_grid=self.param_grid,
+            cv=3
+        )
+        with mlflow.start_run(nested=True):
+            gs.fit(X, y)
+            # Log best params explicitly if needed
+            mlflow.log_params(gs.best_params_)
+        # Feature selection
         selector = SelectFromModel(gs.best_estimator_, threshold='median')
         selector.fit(X, y)
         self.support_ = selector.get_support()
+        self.best_params_ = gs.best_params_
         return self
 
     def transform(self, X):
         return X[:, self.support_]
 
 class RedundancyEliminator(BaseEstimator, TransformerMixin):
-    def __init__(self, corr_threshold=0.9, param_grid=None):
-        self.corr_threshold = corr_threshold
-        self.param_grid = param_grid or {}
+    def __init__(self, param_grid):
+        self.param_grid = param_grid
 
-    def fit(self, X, y=None):
-        if self.param_grid:
-            gs = GridSearchCV(LGBMRegressor(), self.param_grid, cv=3, n_jobs=-1)
+    def fit(self, X, y):
+        # Stage 2: hyperparameter re-tuning on reduced features
+        gs = GridSearchCV(
+            estimator=LGBMClassifier(),
+            param_grid=self.param_grid,
+            cv=3
+        )
+        with mlflow.start_run(nested=True):
             gs.fit(X, y)
-            self.best_params_ = gs.best_params_
-        else:
-            self.best_params_ = {}
-        corr = np.abs(np.corrcoef(X, rowvar=False))
-        to_remove = {j for i in range(corr.shape[0]) for j in range(i) if corr[i, j] > self.corr_threshold}
-        self.support_ = np.array([i not in to_remove for i in range(X.shape[1])])
+            mlflow.log_params(gs.best_params_)
+        # Redundancy elimination (e.g., remove highly correlated)
+        X_sel = X.copy()
+        corr = np.abs(np.corrcoef(X_sel, rowvar=False))
+        to_remove = set()
+        for i in range(corr.shape[0]):
+            for j in range(i):
+                if corr[i, j] > 0.9:
+                    to_remove.add(i)
+        mask = np.array([i not in to_remove for i in range(X_sel.shape[1])])
+        self.support_ = mask
+        self.best_params_ = gs.best_params_
         return self
 
     def transform(self, X):
         return X[:, self.support_]
 
-# --- FoldAggregator using CutoffSplitter ---
+if __name__ == '__main__':
+
+
+    # Assemble pipeline
+    param_grid_stage1 = {'n_estimators': [50, 100], 'max_depth': [3, 5]}
+    param_grid_stage2 = {'n_estimators': [30, 60], 'learning_rate': [0.01, 0.1]}
+
+    pipe = Pipeline([
+        ('all_rel', AllRelevantSelector(param_grid_stage1)),
+        ('redund', RedundancyEliminator(param_grid_stage2)),
+        ('final', LGBMClassifier())  # Final fit also autologged
+    ])
+
+    # Fit pipeline (this logs nested runs for each stage and final model)
+    X_train = np.random.randn(200, 20)
+    y_train = np.random.randint(0, 2, 200)
+    with mlflow.start_run(run_name="two_stage_fs"):
+        pipe.fit(X_train, y_train)
+
+    # Extract results
+    print("Stage 1 best params:", pipe.named_steps['all_rel'].best_params_)
+    print("Stage 1 selected features:", pipe.named_steps['all_rel'].support_.sum())
+    print("Stage 2 best params:", pipe.named_steps['redund'].best_params_)
+    print("Stage 2 selected features:", pipe.named_steps['redund'].support_.sum())
+
+import numpy as np
+import pandas as pd
+from sklearn.base import BaseEstimator, TransformerMixin, clone
+from sklearn.model_selection import TimeSeriesSplit
+from joblib import Parallel, delayed
+from lightgbm import LGBMClassifier
+
 class FoldAggregator(BaseEstimator, TransformerMixin):
-    def __init__(self, pipeline, cv, n_jobs=1):
+    def __init__(self, pipeline, cv=None, n_jobs=1):
         self.pipeline = pipeline
-        self.cv = cv
+        self.cv = cv or TimeSeriesSplit(n_splits=5)
         self.n_jobs = n_jobs
 
     def _fit_one(self, X, y, train_idx, test_idx, fold_id):
+        """Fit a cloned pipeline on one fold and extract artifacts."""
         pipe = clone(self.pipeline)
         X_tr, y_tr = X[train_idx], y[train_idx]
         pipe.fit(X_tr, y_tr)
-        return pipe.named_steps['redund'].support_
+        # Example: two-stage selectors named 'all_rel' and 'redund'
+        mask1 = pipe.named_steps['all_rel'].support_
+        params1 = pipe.named_steps['all_rel'].best_params_
+        mask2 = pipe.named_steps['redund'].support_
+        params2 = pipe.named_steps['redund'].best_params_
+        # Could compute score on test set if desired
+        return {'fold': fold_id,
+                'mask1': mask1, 'params1': params1,
+                'mask2': mask2, 'params2': params2}
 
     def fit(self, X, y=None):
-        splits = list(self.cv.split(y))
-        masks = Parallel(n_jobs=self.n_jobs)(
+        # Prepare indices
+        splits = list(self.cv.split(X, y))
+        # Parallel fit
+        results = Parallel(n_jobs=self.n_jobs)(
             delayed(self._fit_one)(X, y, tr, ts, i)
             for i, (tr, ts) in enumerate(splits)
         )
-        self.masks_ = np.vstack(masks)
-        self.consensus_mask_ = self.masks_.all(axis=0)
+        # Aggregate
+        self.masks1_ = np.vstack([r['mask1'] for r in results])
+        self.params1_ = [r['params1'] for r in results]
+        self.masks2_ = np.vstack([r['mask2'] for r in results])
+        self.params2_ = [r['params2'] for r in results]
+        # Consensus mask: features selected in every fold
+        self.consensus_mask1_ = self.masks1_.all(axis=0)
+        self.consensus_mask2_ = self.masks2_.all(axis=0)
         return self
 
     def transform(self, X):
-        return X[:, self.consensus_mask_]
+        # Apply consensus feature reduction (stage 2 mask supersedes stage1)
+        mask = self.consensus_mask2_
+        return X[:, mask]
+
+    def get_fold_summary(self):
+        """Return a DataFrame summarizing per-fold parameters."""
+        df = pd.DataFrame({
+            'fold': list(range(len(self.params1_))),
+            'stage1_params': self.params1_,
+            'stage2_params': self.params2_
+        })
+        return df
+
 
 # --- Main script example ---
 if __name__ == '__main__':
@@ -89,6 +179,7 @@ if __name__ == '__main__':
     fs_pipe = Pipeline([
         ('all_rel', AllRelevantSelector(param_grid_stage1)),
         ('redund', RedundancyEliminator(param_grid=param_grid_stage2))
+        ('final', LGBMClassifier())  # Final fit also autologged
     ])
 
     # 3) Consensus feature selection across year-based folds using CutoffSplitter
