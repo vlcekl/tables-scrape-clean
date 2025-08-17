@@ -117,3 +117,34 @@ if __name__ == "__main__":
     print("PIT mean (uncal, cal):", float(U_unc.mean()), float(U_cal.mean()))
     print("PIT std  (uncal, cal):", float(U_unc.std()),  float(U_cal.std()))
 ```
+
+    # --- Calibrate full CDFs for TEST samples ---
+    n_test = 3
+    X_te = rng.uniform(-1, 1, size=n_test)
+    mu_te = 2.0 + 3.0 * X_te
+    sigma_te = 0.5 + 0.5 * np.abs(X_te)
+
+    # Predicted (uncalibrated) quantiles for test samples
+    Q_test = mu_te[:, None] + sigma_te[:, None] * z_hat[None, :]
+
+    # y-grid on which we evaluate full CDFs
+    y_grid = np.linspace(mu_te.min() - 3 * sigma_te.max(),
+                         mu_te.max() + 3 * sigma_te.max(), 201)
+
+    for k in range(n_test):
+        # Uncalibrated and calibrated CDFs on the grid
+        F_unc = np.interp(y_grid, np.maximum.accumulate(Q_test[k]), alphas, left=0.0, right=1.0)
+        F_cal = cal.calibrate_cdf(Q_test[k], y_grid)
+
+        print(f"
+Test sample {k}: x={X_te[k]:+.3f}, mu={mu_te[k]:.3f}, sigma={sigma_te[k]:.3f}")
+        # Compare y-values at selected CDF levels (quantiles) before/after calibration
+        for prob in (0.1, 0.5, 0.9):
+            y_unc = np.interp(prob, alphas, np.maximum.accumulate(Q_test[k]))
+            y_cal = cal.calibrated_quantiles(Q_test[k], np.array([prob]))[0]
+            print(f"  y at F={prob:.1f}: uncal={y_unc:.3f}, cal={y_cal:.3f}")
+        # Compare probabilities at a fixed threshold (e.g., y = mu_te[k])
+        y0 = mu_te[k]
+        p_unc = np.interp(y0, np.maximum.accumulate(Q_test[k]), alphas, left=0.0, right=1.0)
+        p_cal = cal.calibrate_cdf(Q_test[k], np.array([y0]))[0]
+        print(f"  P(Y<=mu):   uncal={p_unc:.3f}, cal={p_cal:.3f}")
