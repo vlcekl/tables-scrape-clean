@@ -193,3 +193,128 @@ if __name__ == "__main__":
         q_cal = cal.calibrated_quantiles(Q_te[i], show)
         print(f"Sample {i}: uncal {np.round(q_unc,3)} | cal {np.round(q_cal,3)}")
 ```
+
+
+# ============================== Venn–Abers for Binary Calibration ==============================
+from sklearn.base import BaseEstimator, ClassifierMixin
+from sklearn.ensemble import GradientBoostingClassifier
+from sklearn.metrics import log_loss, brier_score_loss
+
+class VennAbersCalibratedClassifier(BaseEstimator, ClassifierMixin):
+    """
+    Venn–Abers calibrated wrapper for a binary classifier using sklearn's IsotonicRegression.
+
+    Notes
+    -----
+    * Assumes `base_estimator` exposes `predict_proba(X)[:, 1]` as a monotone score.
+    * Uses the inductive VA procedure: for each test score s, fit isotonic on the
+      calibration set augmented with (s, y=0) to get p0(s), and with (s, y=1) to get p1(s).
+      Returns the canonical combined probability: p = p1 / (1 - p0 + p1).
+    * Also exposes optional probability intervals [min(p0,p1), max(p0,p1)].
+    * This simple reference implementation is computation-heavy (2 isotonic fits per test point).
+      For large calibration/test sets consider binning scores prior to isotonic.
+    """
+    def __init__(self, base_estimator, increasing=True, out_of_bounds="clip"):
+        self.base_estimator = base_estimator
+        self.increasing = increasing
+        self.out_of_bounds = out_of_bounds
+        self._s_cal = None
+        self._y_cal = None
+
+    def fit(self, X_cal, y_cal):
+        # Store calibration scores and labels; base estimator assumed pre-fitted.
+        self._s_cal = np.asarray(self.base_estimator.predict_proba(X_cal)[:, 1], float)
+        self._y_cal = np.asarray(y_cal, int)
+        return self
+
+    def _fit_iso_aug(self, s_new, y_new):
+        s_aug = np.concatenate([self._s_cal, np.atleast_1d(s_new)])
+        y_aug = np.concatenate([self._y_cal, np.atleast_1d(y_new)])
+        iso = IsotonicRegression(increasing=self.increasing,
+                                 out_of_bounds=self.out_of_bounds,
+                                 y_min=0.0, y_max=1.0)
+        iso.fit(s_aug, y_aug)
+        return iso
+
+    def _p0_p1(self, s):
+        p0 = float(self._fit_iso_aug(s, 0).predict([s])[0])
+        p1 = float(self._fit_iso_aug(s, 1).predict([s])[0])
+        return p0, p1
+
+    def predict_proba(self, X, return_interval=False):
+        s = np.asarray(self.base_estimator.predict_proba(X)[:, 1], float)
+        n = s.size
+        p = np.empty(n, float)
+        lo = np.empty(n, float)
+        hi = np.empty(n, float)
+        for i, si in enumerate(s):
+            p0, p1 = self._p0_p1(si)
+            lo[i], hi[i] = (p0, p1) if p0 <= p1 else (p1, p0)
+            denom = (1.0 - p0 + p1)
+            p[i] = 0.5 if denom <= 0 else np.clip(p1 / denom, 0.0, 1.0)
+        proba = np.column_stack([1.0 - p, p])
+        if return_interval:
+            return proba, np.column_stack([lo, hi])
+        return proba
+
+    def predict(self, X):
+        return (self.predict_proba(X)[:, 1] >= 0.5).astype(int)
+
+
+def _ece(proba_pos, y_true, n_bins=15):
+    """Simple Expected Calibration Error for binary probs (|acc - conf| averaged over bins)."""
+    proba_pos = np.asarray(proba_pos, float)
+    y_true = np.asarray(y_true, int)
+    bins = np.linspace(0.0, 1.0, n_bins + 1)
+    ece = 0.0
+    for b0, b1 in zip(bins[:-1], bins[1:]):
+        mask = (proba_pos >= b0) & (proba_pos < b1)
+        if not np.any(mask):
+            continue
+        conf = proba_pos[mask].mean()
+        acc = y_true[mask].mean()
+        ece += (mask.mean()) * abs(acc - conf)
+    return float(ece)
+
+
+if __name__ == "__main__":
+    # ===================== Synthetic binary task: train / calibrate / evaluate =====================
+    rng = np.random.default_rng(123)
+    n, d = 5000, 10
+    X = rng.normal(size=(n, d))
+    # Nonlinear logit with feature interactions
+    logits = (1.0*X[:,0] - 1.2*X[:,1] + 0.8*X[:,2]*X[:,3] + 0.5*np.sin(X[:,4])
+              + 0.7*X[:,5] - 0.4*X[:,6] + 0.3*X[:,7]**2)
+    p = 1.0 / (1.0 + np.exp(-logits))
+    y = (rng.random(n) < p).astype(int)
+
+    # Split: train for base model, calibration for VA, test for evaluation
+    X_tr, X_tmp, y_tr, y_tmp = train_test_split(X, y, test_size=0.40, random_state=0)
+    X_cal, X_te, y_cal, y_te = train_test_split(X_tmp, y_tmp, test_size=0.50, random_state=1)
+
+    # Base classifier
+    base = GradientBoostingClassifier(random_state=0)
+    base.fit(X_tr, y_tr)
+
+    # Uncalibrated metrics on test
+    prob_unc = base.predict_proba(X_te)[:, 1]
+    print("Uncalibrated  log-loss: {:.4f}".format(log_loss(y_te, prob_unc)))
+    print("Uncalibrated   Brier  : {:.4f}".format(brier_score_loss(y_te, prob_unc)))
+    print("Uncalibrated     ECE  : {:.4f}".format(_ece(prob_unc, y_te)))
+
+    # Venn–Abers calibration on held-out calibration set
+    va = VennAbersCalibratedClassifier(base)
+    va.fit(X_cal, y_cal)
+
+    # Calibrated probabilities on test
+    prob_cal = va.predict_proba(X_te)[:, 1]
+    print("Calibrated    log-loss: {:.4f}".format(log_loss(y_te, prob_cal)))
+    print("Calibrated     Brier  : {:.4f}".format(brier_score_loss(y_te, prob_cal)))
+    print("Calibrated       ECE  : {:.4f}".format(_ece(prob_cal, y_te)))
+
+    # Optionally inspect VA intervals for the first few test points
+    proba_int = va.predict_proba(X_te[:5], return_interval=True)
+    if isinstance(proba_int, tuple):
+        _, intervals = proba_int
+        for i in range(intervals.shape[0]):
+            print(f"Test {i}: VA interval = [{intervals[i,0]:.3f}, {intervals[i,1]:.3f}]")
